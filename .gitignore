@@ -1,0 +1,79 @@
+# Prerequisites
+*.d
+
+# Compiled object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Linker/debugger files
+*.ilk
+*.pdb
+*.dwo
+
+# Compiled dynamic libraries
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Compiled static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Build directories
+build/
+Build/
+build-*/
+cmake-build-*/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+install_manifest.txt
+compile_commands.json
+
+# Temporary/log/cache files
+*.tmp
+*.log
+*.bak
+*.swp
+Testing/
+.cache/
+
+# Package/build tools
+vcpkg_installed/
+
+# IDE/editor settings
+.vscode/
+.idea/
+.claude/settings.local.json
+
+# VRI / SDR capture data
+*.iq
+*.dat
+*.cfile
+*.raw
+*.pcap
+*.sigmf-data
+*.sigmf-meta
+*.mat
+*.h5
+*.npy
+
+# Optional: only keep this if .bin files are generated data, not required project files
+*.bin
