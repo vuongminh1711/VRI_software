@@ -2,6 +2,6 @@
 
 int main(int argc, char** argv)
 {
-  printf("VRI software app starting...\n");
+  printf("Hello, World!\n");
   return 0;
 }
