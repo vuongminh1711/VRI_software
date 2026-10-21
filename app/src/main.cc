@@ -28,6 +28,8 @@ struct args_t {
   bool     verbose        = false;
   bool     monitor        = false; // capture the TX->RX loopback to a file for offline viewing
   float    monitor_gain   = 20.0f;
+  bool     confirm_tx     = false; // pause for Y/n after cell search, before transmit/monitor start
+  char*    iq_out_file    = nullptr; // if set, write the synthetic channel here instead of transmitting it
 };
 
 static void usage(const char* prog, const args_t& def)
@@ -43,10 +45,17 @@ static void usage(const char* prog, const args_t& def)
   printf("\t-N <N>       frames to transmit, 0 = until Ctrl+C [Default %u]\n", def.nof_tx_frames);
   printf("\t-P <N>       physical TX chains available, clamps the clone's antenna port count [Default %u]\n",
          def.max_tx_ports);
-  printf("\t-m           capture the TX->RX loopback to iq_capture/loopback.fc32 while transmitting\n");
-  printf("\t             (needs -a with 2 channels per side, e.g. tx_subdev_spec=\"A:0 B:0\",\n");
-  printf("\t             rx_subdev_spec=\"A:0 B:0\"; channel 1 is the monitor)\n");
+  printf("\t-m           capture both RX channels while transmitting: channel 0 to\n");
+  printf("\t             iq_capture/loopbackA.fc32, channel 1 (the TX->RX loopback) to\n");
+  printf("\t             iq_capture/loopbackB.fc32 (needs -a with 2 channels per side, e.g.\n");
+  printf("\t             tx_subdev_spec=\"A:0 B:0\", rx_subdev_spec=\"A:0 B:0\")\n");
   printf("\t-M <db>      monitor channel RX gain [Default %.1f]\n", def.monitor_gain);
+  printf("\t-i           ask [Y/n] after cell search/CFI capture, before transmit/monitor start\n");
+  printf("\t             (lets you re-cable while the RF session is held open)\n");
+  printf("\t-o <file>    dry run: write the synthetic channel's IQ samples (interleaved\n");
+  printf("\t             complex-float32, one sample per port per subframe) to <file>\n");
+  printf("\t             instead of transmitting them. No TX RF setup/output happens; RX\n");
+  printf("\t             (cell search/CFI capture) still uses real hardware as usual.\n");
   printf("\t-t           force-TDD hint for cell search\n");
   printf("\t-v           verbose\n");
 }
@@ -71,7 +80,7 @@ static args_t parse_args(int argc, char** argv)
   bool   have_freq = false;
 
   int opt;
-  while ((opt = getopt(argc, argv, "f:c:d:a:g:G:n:N:P:M:mtvh")) != -1) {
+  while ((opt = getopt(argc, argv, "f:c:d:a:g:G:n:N:P:M:o:mitvh")) != -1) {
     switch (opt) {
       case 'f':
         args.freq_hz = strtod(optarg, NULL);
@@ -107,6 +116,12 @@ static args_t parse_args(int argc, char** argv)
       case 'M':
         args.monitor_gain = strtof(optarg, NULL);
         break;
+      case 'i':
+        args.confirm_tx = true;
+        break;
+      case 'o':
+        args.iq_out_file = optarg;
+        break;
       case 't':
         args.force_tdd = true;
         break;
@@ -126,6 +141,12 @@ static args_t parse_args(int argc, char** argv)
   }
   if (args.earfcn >= 0) {
     args.freq_hz = srsran_band_fd((uint32_t)args.earfcn) * 1e6;
+  }
+  if (args.monitor && args.iq_out_file) {
+    fprintf(stderr, "-m (capture TX->RX loopback) and -o (dry-run to file) are mutually exclusive: "
+                     "-o never transmits, so there is nothing for -m to capture\n\n");
+    usage(argv[0], def);
+    exit(1);
   }
 
   return args;
@@ -184,6 +205,16 @@ int main(int argc, char** argv)
     exit_now(0);
   }
 
+  if (args.confirm_tx) {
+    printf("Cell found and CFI captured. Re-cable now if needed. Start transmitting? [Y/n] ");
+    fflush(stdout);
+    char answer[16] = {};
+    if (fgets(answer, sizeof(answer), stdin) && (answer[0] == 'n' || answer[0] == 'N')) {
+      printf("Aborted before transmit.\n");
+      exit_now(0);
+    }
+  }
+
   // The clone must be self-consistent: PBCH's CRC mask and the CRS pattern
   // are both derived from nof_ports, so we can't fake a 4-port cell over 1
   // physical TX chain. Clamp to whatever hardware is actually available
@@ -199,16 +230,22 @@ int main(int argc, char** argv)
   monitor_ctx_t mon_ctx;
   bool          monitoring = false;
   if (args.monitor) {
-    monitoring = start_monitor(&rf, cfg.cell.nof_prb, 1, cfg.freq_hz, args.monitor_gain, "iq_capture", "loopback.fc32", &mon_ctx);
+    monitoring = start_monitor(
+        &rf, cfg.cell.nof_prb, cfg.freq_hz, args.monitor_gain, "iq_capture", "loopbackA.fc32", "loopbackB.fc32", &mon_ctx);
     if (!monitoring) {
       fprintf(stderr, "Could not start loopback monitor, continuing without it\n");
     }
   }
 
-  transmit_channel(&rf, &cfg, args.tx_gain, args.nof_tx_frames);
+  bool tx_ok = transmit_channel(&rf, &cfg, args.tx_gain, args.nof_tx_frames, args.iq_out_file);
 
   if (monitoring) {
     stop_monitor(&mon_ctx);
+  }
+
+  if (!tx_ok) {
+    fprintf(stderr, "Transmit setup failed, see errors above\n");
+    exit_now(1);
   }
 
   printf("Done\n");

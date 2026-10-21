@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "rf_helpers.h"
+#include "srsran/phy/io/filesink.h"
 #include "srsran/srsran.h"
 
 // Fixed test identity/allocation for the synthetic channel: a made-up C-RNTI
@@ -16,8 +17,14 @@
 #define TEST_MCS_IDX 10
 #define MAX_SRATE_DELTA_HZ 2
 
-void transmit_channel(srsran_rf_t* rf, const channel_config_t* cfg, float tx_gain, uint32_t nof_frames)
+bool transmit_channel(srsran_rf_t*            rf,
+                       const channel_config_t* cfg,
+                       float                   tx_gain,
+                       uint32_t                nof_frames,
+                       const char*             iq_out_path)
 {
+  bool dry_run = (iq_out_path != nullptr);
+
   srsran_cell_t cell = cfg->cell;
 
   if (cell.nof_ports > 1) {
@@ -34,6 +41,10 @@ void transmit_channel(srsran_rf_t* rf, const channel_config_t* cfg, float tx_gai
   uint8_t* data[SRSRAN_MAX_CODEWORDS] = {};
   for (uint32_t i = 0; i < SRSRAN_MAX_CODEWORDS; i++) {
     data[i] = srsran_vec_u8_malloc(SOFTBUFFER_SIZE);
+    if (!data[i]) {
+      fprintf(stderr, "Error allocating data buffer\n");
+      return false;
+    }
     bzero(data[i], sizeof(uint8_t) * SOFTBUFFER_SIZE);
   }
 
@@ -41,9 +52,17 @@ void transmit_channel(srsran_rf_t* rf, const channel_config_t* cfg, float tx_gai
   cf_t* output_buffer[SRSRAN_MAX_PORTS] = {};
   for (uint32_t i = 0; i < SRSRAN_MAX_PORTS; i++) {
     sf_buffer[i] = srsran_vec_cf_malloc(sf_n_re);
+    if (!sf_buffer[i]) {
+      fprintf(stderr, "Error allocating sf_buffer\n");
+      return false;
+    }
   }
   for (uint32_t i = 0; i < SRSRAN_MAX_PORTS; i++) {
     output_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
+    if (!output_buffer[i]) {
+      fprintf(stderr, "Error allocating output_buffer\n");
+      return false;
+    }
     srsran_vec_cf_zero(output_buffer[i], sf_n_samples);
   }
   cf_t* sf_symbols[SRSRAN_MAX_PORTS];
@@ -53,33 +72,70 @@ void transmit_channel(srsran_rf_t* rf, const channel_config_t* cfg, float tx_gai
 
   srsran_ofdm_t ifft[SRSRAN_MAX_PORTS];
   for (uint32_t i = 0; i < cell.nof_ports; i++) {
-    srsran_ofdm_tx_init(&ifft[i], cell.cp, sf_buffer[i], output_buffer[i], cell.nof_prb);
+    if (srsran_ofdm_tx_init(&ifft[i], cell.cp, sf_buffer[i], output_buffer[i], cell.nof_prb)) {
+      fprintf(stderr, "Error creating iFFT object for port %u\n", i);
+      return false;
+    }
     srsran_ofdm_set_normalize(&ifft[i], true);
   }
 
   srsran_pbch_t pbch;
-  srsran_pbch_init(&pbch);
-  srsran_pbch_set_cell(&pbch, cell);
+  if (srsran_pbch_init(&pbch)) {
+    fprintf(stderr, "Error creating PBCH object\n");
+    return false;
+  }
+  if (srsran_pbch_set_cell(&pbch, cell)) {
+    fprintf(stderr, "Error setting cell in PBCH object\n");
+    return false;
+  }
 
   srsran_regs_t regs;
-  srsran_regs_init(&regs, cell);
+  if (srsran_regs_init(&regs, cell)) {
+    fprintf(stderr, "Error initiating regs\n");
+    return false;
+  }
 
   srsran_pcfich_t pcfich;
-  srsran_pcfich_init(&pcfich, 1);
-  srsran_pcfich_set_cell(&pcfich, &regs, cell);
+  if (srsran_pcfich_init(&pcfich, 1)) {
+    fprintf(stderr, "Error creating PCFICH object\n");
+    return false;
+  }
+  if (srsran_pcfich_set_cell(&pcfich, &regs, cell)) {
+    fprintf(stderr, "Error setting cell in PCFICH object\n");
+    return false;
+  }
 
   srsran_pdcch_t pdcch;
-  srsran_pdcch_init_enb(&pdcch, cell.nof_prb);
-  srsran_pdcch_set_cell(&pdcch, &regs, cell);
+  if (srsran_pdcch_init_enb(&pdcch, cell.nof_prb)) {
+    fprintf(stderr, "Error creating PDCCH object\n");
+    return false;
+  }
+  if (srsran_pdcch_set_cell(&pdcch, &regs, cell)) {
+    fprintf(stderr, "Error setting cell in PDCCH object\n");
+    return false;
+  }
 
   srsran_pdsch_t pdsch;
-  srsran_pdsch_init_enb(&pdsch, cell.nof_prb);
-  srsran_pdsch_set_cell(&pdsch, cell);
+  if (srsran_pdsch_init_enb(&pdsch, cell.nof_prb)) {
+    fprintf(stderr, "Error creating PDSCH object\n");
+    return false;
+  }
+  if (srsran_pdsch_set_cell(&pdsch, cell)) {
+    fprintf(stderr, "Error setting cell in PDSCH object\n");
+    return false;
+  }
 
   srsran_softbuffer_tx_t* softbuffers[SRSRAN_MAX_CODEWORDS];
   for (uint32_t i = 0; i < SRSRAN_MAX_CODEWORDS; i++) {
     softbuffers[i] = (srsran_softbuffer_tx_t*)calloc(sizeof(srsran_softbuffer_tx_t), 1);
-    srsran_softbuffer_tx_init(softbuffers[i], cell.nof_prb);
+    if (!softbuffers[i]) {
+      fprintf(stderr, "Error allocating soft buffer\n");
+      return false;
+    }
+    if (srsran_softbuffer_tx_init(softbuffers[i], cell.nof_prb)) {
+      fprintf(stderr, "Error initiating soft buffer\n");
+      return false;
+    }
   }
 
   cf_t  pss_signal[SRSRAN_PSS_LEN];
@@ -89,30 +145,54 @@ void transmit_channel(srsran_rf_t* rf, const channel_config_t* cfg, float tx_gai
   srsran_sss_generate(sss_signal0, sss_signal5, cell.id);
 
   srsran_refsignal_t csr_refs;
-  srsran_refsignal_cs_init(&csr_refs, cell.nof_prb);
-  srsran_refsignal_cs_set_cell(&csr_refs, cell);
+  if (srsran_refsignal_cs_init(&csr_refs, cell.nof_prb)) {
+    fprintf(stderr, "Error initializing CRS\n");
+    return false;
+  }
+  if (srsran_refsignal_cs_set_cell(&csr_refs, cell)) {
+    fprintf(stderr, "Error setting cell in CRS\n");
+    return false;
+  }
 
-  // RF: sample rate, gain, frequency
+  // RF: sample rate, gain, frequency (skipped entirely in dry-run: rf is left untouched)
   int srate = srsran_sampling_freq_hz(cell.nof_prb);
   if (srate <= 0) {
     fprintf(stderr, "Invalid number of PRB %d\n", cell.nof_prb);
-    return;
+    return false;
   }
-  printf("Setting TX sampling rate %.2f MHz\n", (float)srate / 1e6);
-  double srate_rf = srsran_rf_set_tx_srate(rf, (double)srate);
-  if (std::abs(srate - (int)srate_rf) > MAX_SRATE_DELTA_HZ) {
-    fprintf(stderr, "Could not set TX sampling rate: wanted %d got %f\n", srate, srate_rf);
-    return;
+  if (!dry_run) {
+    printf("Setting TX sampling rate %.2f MHz\n", (float)srate / 1e6);
+    double srate_rf = srsran_rf_set_tx_srate(rf, (double)srate);
+    if (std::abs(srate - (int)srate_rf) > MAX_SRATE_DELTA_HZ) {
+      fprintf(stderr, "Could not set TX sampling rate: wanted %d got %f\n", srate, srate_rf);
+      return false;
+    }
+    srsran_rf_set_tx_gain(rf, tx_gain);
+    printf("Set TX gain: %.1f dB\n", srsran_rf_get_tx_gain(rf));
+    printf("Set TX freq: %.2f MHz\n", srsran_rf_set_tx_freq(rf, cell.nof_ports, cfg->freq_hz) / 1e6);
+    printf("Transmitting clone of cell %d (%d PRB, %d ports, CFI=%u) — route TX into RX via a cable/attenuator, "
+           "not an antenna.\n",
+           cell.id,
+           cell.nof_prb,
+           cell.nof_ports,
+           cfg->cfi);
+  } else {
+    printf("Dry run: generating clone of cell %d (%d PRB, %d ports, CFI=%u, %.2f MHz) to %s — no RF TX involved.\n",
+           cell.id,
+           cell.nof_prb,
+           cell.nof_ports,
+           cfg->cfi,
+           cfg->freq_hz / 1e6,
+           iq_out_path);
   }
-  srsran_rf_set_tx_gain(rf, tx_gain);
-  printf("Set TX gain: %.1f dB\n", srsran_rf_get_tx_gain(rf));
-  printf("Set TX freq: %.2f MHz\n", srsran_rf_set_tx_freq(rf, cell.nof_ports, cfg->freq_hz) / 1e6);
-  printf("Transmitting clone of cell %d (%d PRB, %d ports, CFI=%u) — route TX into RX via a cable/attenuator, "
-         "not an antenna.\n",
-         cell.id,
-         cell.nof_prb,
-         cell.nof_ports,
-         cfg->cfi);
+
+  srsran_filesink_t iq_sink;
+  if (dry_run) {
+    if (srsran_filesink_init(&iq_sink, iq_out_path, SRSRAN_COMPLEX_FLOAT_BIN)) {
+      fprintf(stderr, "Error opening IQ output file %s\n", iq_out_path);
+      return false;
+    }
+  }
 
   // Fixed downlink resource allocation: whole bandwidth, one codeword, test RNTI.
   srsran_dci_dl_t dci_dl;
@@ -203,7 +283,11 @@ void transmit_channel(srsran_rf_t* rf, const channel_config_t* cfg, float tx_gai
       for (uint32_t i = 0; i < cell.nof_ports; i++) {
         srsran_vec_sc_prod_cfc(output_buffer[i], 0.8f * norm_factor, output_buffer[i], SRSRAN_SF_LEN_PRB(cell.nof_prb));
       }
-      srsran_rf_send_multi(rf, (void**)output_buffer, sf_n_samples, true, start_of_burst, false);
+      if (dry_run) {
+        srsran_filesink_write_multi(&iq_sink, (void**)output_buffer, sf_n_samples, cell.nof_ports);
+      } else {
+        srsran_rf_send_multi(rf, (void**)output_buffer, sf_n_samples, true, start_of_burst, false);
+      }
       start_of_burst = false;
     }
     nf++;
@@ -228,4 +312,11 @@ void transmit_channel(srsran_rf_t* rf, const channel_config_t* cfg, float tx_gai
     free(sf_buffer[i]);
     free(output_buffer[i]);
   }
+
+  if (dry_run) {
+    srsran_filesink_free(&iq_sink);
+    printf("Dry run: wrote IQ samples to %s\n", iq_out_path);
+  }
+
+  return true;
 }
